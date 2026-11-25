@@ -160,8 +160,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.miniMaxWeb = miniMaxWeb
             // DeepSeek's ring is DeepSeekProvider, which reads either this
             // sign-in or an API key, so the WebView is not a ring of its own.
-            let webProviders: [WebSessionProvider] = [qianwen, mimo, qoder]
-            fleet.signInItems = [deepSeek, miniMaxWeb, qianwen, mimo, qoder].map { provider in
+            let geminiApp = WebSessionProvider(site: GeminiAppUsage.site)
+            let webProviders: [WebSessionProvider] = [qianwen, mimo, qoder, geminiApp]
+            fleet.signInItems = [deepSeek, miniMaxWeb, qianwen, mimo, qoder, geminiApp].map { provider in
                 let name = provider.displayName
                 return (title: L10n.t("Sign in to \(name)…"),
                         action: { [weak provider] in provider?.presentSignIn() })
@@ -282,6 +283,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Costs.attach(to: store)
             deepSeek.onAuthenticated = { [weak store] in
                 store?.providerAuthenticationChanged(providerID: "deepseek")
+            }
+            geminiApp.onAuthenticated = { [weak store] in
+                store?.providerAuthenticationChanged(providerID: "gemini-app")
             }
             qianwen.onAuthenticated = { [weak store] in
                 store?.providerAuthenticationChanged(providerID: "qianwenai")

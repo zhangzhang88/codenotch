@@ -619,6 +619,7 @@ struct ProviderSnapshot: Identifiable, Equatable {
             let slug = CodexProfile.slug(fromProviderID: id)!
             return L10n.t("Sign in to Codex in ~/.codex-\(slug) to read your usage", locale: locale)
         case "gemini":     return L10n.t("Sign in to Antigravity to read your usage", locale: locale)
+        case "gemini-app": return L10n.t("Sign in to Gemini App in Codenotch to read your usage", locale: locale)
         case _ where AntigravityProfile.slug(fromProviderID: id) != nil:
             let slug = AntigravityProfile.slug(fromProviderID: id)!
             return L10n.t("Sign in to Antigravity in ~/.gemini/antigravity-\(slug) to read your usage", locale: locale)

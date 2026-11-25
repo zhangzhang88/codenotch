@@ -1,0 +1,16 @@
+include:
+  - project.yml
+name: CodenotchQuotaTest
+targets:
+  Codenotch:
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.codenotch.quota-test
+    info:
+      properties:
+        CFBundleDisplayName: Codenotch Quota Test
+        SUEnableAutomaticChecks: false
+  CodenotchTests:
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.codenotch.quota-test.tests
