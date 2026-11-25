@@ -3,15 +3,17 @@ import Foundation
 /// Gemini chat usage comes from the Gemini usage page, independently of Antigravity.
 enum GeminiAppUsage {
     @MainActor static var site: WebSessionProvider.Site {
-        WebSessionProvider.Site(
+        let usageScript = requestScript + "return JSON.stringify(await readUsage());"
+        return WebSessionProvider.Site(
             id: "gemini-app",
             displayName: "Gemini App",
             glyph: .geminiSpark,
             origin: URL(string: "https://gemini.google.com")!,
-            script: requestScript + "return JSON.stringify(await readUsage());",
-            authProbeScript: requestScript + "return (await readUsage()).status === 200;",
+            script: usageScript,
+            authProbeScript: usageScript,
             logsResponseBody: false,
             pollsDuringSignIn: true,
+            confirmsSignInFromUsage: true,
             initialPath: "usage",
             headlineID: "gemini-app-5h",
             weeklyID: "gemini-app-weekly",

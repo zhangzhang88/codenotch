@@ -8,14 +8,18 @@ struct WebSessionAuthenticationGate: Equatable {
     private(set) var baselineFingerprint: String?
     private(set) var sawLogout = false
     private let requiresNewFingerprint: Bool
+    private let acceptsExistingSession: Bool
     private var unauthenticatedSamples = 0
 
-    init(baselineFingerprint: String?, requiresNewFingerprint: Bool = true) {
+    init(baselineFingerprint: String?, requiresNewFingerprint: Bool = true,
+         acceptsExistingSession: Bool = false) {
         self.baselineFingerprint = baselineFingerprint
         self.requiresNewFingerprint = requiresNewFingerprint
+        self.acceptsExistingSession = acceptsExistingSession
     }
 
-    /// A sign-in window commits only after a real logout/login transition.
+    /// A sign-in window normally commits after a real logout/login transition.
+    /// A provider can also accept an already verified session for ordinary sign-in.
     /// Switching accounts additionally requires a new session identity. This
     /// keeps an already-authenticated old page from being mistaken for the new
     /// account.
@@ -33,6 +37,7 @@ struct WebSessionAuthenticationGate: Equatable {
         }
 
         unauthenticatedSamples = 0
+        if acceptsExistingSession && !requiresNewFingerprint { return true }
         guard sawLogout else {
             if baselineFingerprint == nil { baselineFingerprint = fingerprint }
             return false
@@ -103,6 +108,9 @@ final class WebSessionProvider: NSObject, UsageProvider {
         /// endpoints that have throttled this app, and polling them while
         /// someone types a password is how that happened.
         let pollsDuringSignIn: Bool
+        /// Verify a usable quota response to complete ordinary sign-in, even on
+        /// the first probe. The probe returns the same envelope as a usage read.
+        let confirmsSignInFromUsage: Bool
         /// Whether a refused usage read gets one silent page reload and one
         /// more attempt before the provider reports `needsAuth`.
         ///
@@ -145,6 +153,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
              logsResponseBody: Bool = true,
              associatedHosts: [String] = [],
              pollsDuringSignIn: Bool = false,
+             confirmsSignInFromUsage: Bool = false,
              reloadsSessionOnAuthFailure: Bool = false,
              managePath: String = "usage",
              initialPath: String = "",
@@ -165,6 +174,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
             self.logsResponseBody = logsResponseBody
             self.associatedHosts = associatedHosts
             self.pollsDuringSignIn = pollsDuringSignIn
+            self.confirmsSignInFromUsage = confirmsSignInFromUsage
             self.reloadsSessionOnAuthFailure = reloadsSessionOnAuthFailure
             self.managePath = managePath
             self.initialPath = initialPath
@@ -206,9 +216,8 @@ final class WebSessionProvider: NSObject, UsageProvider {
     private var isLoaded = false
     private var contextRevision: UInt = 0
     private var lastAuthFingerprint: String?
-    /// The URL of the page the sign-in poll last actually probed, so a sheet
-    /// sitting unchanged on one page is not asked the same question every tick.
     private var lastProbedURL: URL?
+    private var signInProbeAttempts = 0
     private var switchGate: WebSessionAuthenticationGate?
 
     var onAuthenticated: (() -> Void)?
@@ -585,13 +594,12 @@ final class WebSessionProvider: NSObject, UsageProvider {
     }
 
     private func presentSignIn(switching: Bool) {
-        // Both flows must see an actual unauthenticated page before accepting
-        // an authenticated probe. Otherwise a stale but valid WebView session
-        // makes ordinary Sign in close immediately. The switching flow keeps
-        // the additional different-fingerprint requirement.
+        // Switching still requires a session change. A quota-backed provider
+        // can confirm ordinary sign-in as soon as the current session works.
         switchGate = WebSessionAuthenticationGate(
             baselineFingerprint: lastAuthFingerprint,
-            requiresNewFingerprint: switching
+            requiresNewFingerprint: switching,
+            acceptsExistingSession: site.confirmsSignInFromUsage
         )
         // Watched from here on, not only at the end: a sign-in can finish on
         // another origin — QianwenAI's SSO runs through account.qianwenai.com
@@ -639,9 +647,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
         }
         isLoaded = false
         // Confirmation belongs to the probe, never to the opening: the poll
-        // below watches the settled page and `windowWillClose` takes one last
-        // look, so a page that is still loading or restoring an existing
-        // session cannot pass for a new sign-in on its own.
+        // below watches the settled page and `windowWillClose` takes one last look.
     }
 
     /// Starts the sheet's probe poll. Only a site that can confirm a session
@@ -651,6 +657,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
         signInProbeTask?.cancel()
         signInProbeTask = nil
         lastProbedURL = nil
+        signInProbeAttempts = 0
         guard site.pollsDuringSignIn, site.authProbeScript != nil else { return }
         signInProbeTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -669,32 +676,29 @@ final class WebSessionProvider: NSObject, UsageProvider {
     /// cross-origin from that page, and its answer would say nothing about the
     /// session this provider is waiting for.
     ///
-    /// One probe per *page*, not one per tick. Ticking blindly put forty
-    /// requests a minute on a sheet that can sit open for minutes while its
-    /// owner fetches a verification code — and for DeepSeek and MiniMax those
-    /// probes are real API calls, against the very endpoints this app has been
-    /// throttled by. A sign-in completes by navigating back to the site, so a
-    /// URL that has changed since the last probe is the event worth a request.
-    /// The first tick runs regardless, and it is also what records the
-    /// logged-out sample the gate requires before a normal sign-in may commit;
-    /// a site that signs in without navigating falls back to the
-    /// close-to-commit path `windowWillClose` already provides.
+    /// Probe once per URL for most providers. A usage-based probe can retry a
+    /// newly loaded page twice while its session settles.
     private func probeSignInPage() async -> Bool {
-        guard let probe = site.authProbeScript, let webView else { return false }
-        // Guarded first, and deliberately not remembered: a tick that found the
-        // page loading, or sitting on an SSO host, probed nothing, and treating
-        // it as progress would skip the probe that matters once the page comes
-        // back to the console.
-        guard !webView.isLoading,
-              Self.matchesOrigin(webView.url, expected: site.origin)
-        else { return false }
-        guard webView.url != lastProbedURL else { return false }
-        lastProbedURL = webView.url
+        guard let probe = site.authProbeScript, let webView, let signInWindow else { return false }
+        guard !webView.isLoading, let pageURL = webView.url,
+              Self.matchesOrigin(pageURL, expected: site.origin) else {
+            // Google can return to the same URL after an SSO round trip.
+            if site.confirmsSignInFromUsage { lastProbedURL = nil }
+            return false
+        }
+        if pageURL != lastProbedURL {
+            lastProbedURL = pageURL
+            signInProbeAttempts = 0
+        }
+        guard signInProbeAttempts < (site.confirmsSignInFromUsage ? 3 : 1) else { return false }
+        signInProbeAttempts += 1
 
         guard let result = try? await webView.callAsyncJavaScript(
                   probe, arguments: [:], in: nil, contentWorld: .page
               ),
-              let state = Self.authenticationState(from: result)
+              !Task.isCancelled, self.signInWindow === signInWindow, self.webView === webView,
+              !webView.isLoading, webView.url == pageURL,
+              let state = Self.authenticationState(from: result, site: site)
         else { return false }
 
         // Read after the probe, not before: signing out or closing the window
@@ -715,7 +719,24 @@ final class WebSessionProvider: NSObject, UsageProvider {
         let fingerprint: String?
     }
 
-    private static func authenticationState(from result: Any?) -> AuthenticationState? {
+    static func hasValidSignInUsage(_ result: Any?, site: Site) -> Bool {
+        struct Response: Decodable {
+            let status: Int
+            let body: String
+        }
+        guard let text = result as? String,
+              let response = try? JSONDecoder().decode(Response.self, from: Data(text.utf8)),
+              responseFailure(status: response.status, site: site) == nil,
+              let windows = try? site.parse(response.body)
+        else { return false }
+        return !windows.isEmpty
+    }
+
+    private static func authenticationState(from result: Any?, site: Site) -> AuthenticationState? {
+        if site.confirmsSignInFromUsage {
+            return AuthenticationState(authenticated: hasValidSignInUsage(result, site: site),
+                                       fingerprint: nil)
+        }
         if let authenticated = result as? Bool {
             return AuthenticationState(authenticated: authenticated, fingerprint: nil)
         }
@@ -735,7 +756,8 @@ final class WebSessionProvider: NSObject, UsageProvider {
         signInProbeTask = nil
         signInWindow?.close()
         signInWindow = nil
-        isLoaded = false
+        // The verified page can refresh directly, preserving Google's account slot.
+        isLoaded = site.confirmsSignInFromUsage
         onAuthenticated?()
     }
 }
@@ -760,12 +782,13 @@ extension WebSessionProvider: NSWindowDelegate {
         let expectedOrigin = site.origin
         signInProbeTask = Task { [weak self, weak pendingWebView] in
             guard let self, let pendingWebView else { return }
-            guard !pendingWebView.isLoading,
-                  Self.matchesOrigin(pendingWebView.url, expected: expectedOrigin),
+            guard !pendingWebView.isLoading, let pageURL = pendingWebView.url,
+                  Self.matchesOrigin(pageURL, expected: expectedOrigin),
                   let result = try? await pendingWebView.callAsyncJavaScript(
                       probe, arguments: [:], in: nil, contentWorld: .page
                   ),
-                  let state = Self.authenticationState(from: result),
+                  !Task.isCancelled, !pendingWebView.isLoading, pendingWebView.url == pageURL,
+                  let state = Self.authenticationState(from: result, site: self.site),
                   pendingGate.acceptsAuthenticatedStateOnManualClose(
                       authenticated: state.authenticated,
                       fingerprint: state.fingerprint)

@@ -10,4 +10,4 @@ bash Scripts/build-quota-test.sh
 
 输出为 `build/quota-test/DerivedData/Build/Products/Release/Codenotch.app`。测试版有独立的应用标识。构建脚本不会启动或替换已安装的应用。
 
-打开测试版后，在「设置 → 账号」找到 Gemini App 并登录。Google 能否在这个内嵌窗口完成登录，以及登录后读取的真实数值，仍需实测。若 Google 拒绝登录，请保留错误信息。Antigravity 原有读数可对照独立应用的 View Usage 页面。
+打开测试版后，在「设置 → 账号」找到 Gemini App 并登录。读取到有效额度后，登录窗口会自动关闭，用量面板会刷新 Gemini App 卡片。Antigravity 的额度可对照 Antigravity IDE 的 View Usage 页面。

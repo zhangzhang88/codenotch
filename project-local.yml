@@ -1,6 +1,9 @@
 include:
   - project.yml
 name: CodenotchQuotaTest
+settings:
+  base:
+    CURRENT_PROJECT_VERSION: "29"
 targets:
   Codenotch:
     settings:
