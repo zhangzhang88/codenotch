@@ -1,6 +1,128 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Available credits": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可用总额"
+          }
+        }
+      }
+    },
+    "Prepaid balance": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Credit balance"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "赠金余额"
+          }
+        }
+      }
+    },
+    "expires in %d days": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "expires in %dd"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%d天后过期"
+          }
+        }
+      }
+    },
+    "Eligible GCP credits": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GCP 赠金"
+          }
+        }
+      }
+    },
+    "Monthly spend limit": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每月上限"
+          }
+        }
+      }
+    },
+    "Tokens this month": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本月 Token"
+          }
+        }
+      }
+    },
+    "No Google AI Studio billing balance found": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到 Google AI Studio 结算余额"
+          }
+        }
+      }
+    },
+    "Sign in to Google AI Studio in Codenotch to read your billing balance": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 Codenotch 中登录 Google AI Studio 以读取结算余额"
+          }
+        }
+      }
+    },
+    "Sign in to Google AI Studio…": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 Google AI Studio…"
+          }
+        }
+      }
+    },
+    "Sign in to Google AI Studio Billing to show credit balance, GCP credits, and monthly spend limit.": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 Google AI Studio 结算页即可显示赠金余额、GCP 赠金和每月支出上限。"
+          }
+        }
+      }
+    },
     "Gemini App": {
       "extractionState": "manual",
       "localizations": {

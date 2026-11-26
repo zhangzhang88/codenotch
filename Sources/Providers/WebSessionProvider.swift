@@ -69,6 +69,21 @@ struct WebSessionAuthenticationGate: Equatable {
 
 }
 
+/// Weak proxy so `WKUserContentController.add(_:name:)` does not retain
+/// `WebSessionProvider` in a cycle.
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: (any WKScriptMessageHandler)?
+
+    init(_ target: any WKScriptMessageHandler) {
+        self.target = target
+    }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
+    }
+}
+
 /// Reads a provider's usage from the endpoint its own web app uses, by running
 /// the request *inside a browser the user signs into themselves*.
 ///
@@ -134,6 +149,18 @@ final class WebSessionProvider: NSObject, UsageProvider {
         let managePath: String
         let initialPath: String
         let bootstrapScript: String?
+        /// Optional script injected into every frame (`forMainFrameOnly: false`)
+        /// at document end, so embedded cross-origin billing widgets inside the
+        /// signed-in console can report sanitized values back via
+        /// `window.webkit.messageHandlers.codenotchFrameData`.
+        let childFrameScript: String?
+        /// Reload the page on each fetch (except immediately after sign-in) for
+        /// consoles whose readings come from rendered page state rather than a
+        /// standalone same-origin API call.
+        let reloadsOnFetch: Bool
+        /// Maximum number of auth probes per URL during sign-in. Defaults to 3
+        /// when `confirmsSignInFromUsage` is true, or 1 otherwise.
+        let maxSignInProbeAttempts: Int?
         /// Semantic window roles declared by the site, rather than inferred
         /// from array order or display copy.
         let headlineID: String?
@@ -158,6 +185,9 @@ final class WebSessionProvider: NSObject, UsageProvider {
              managePath: String = "usage",
              initialPath: String = "",
              bootstrapScript: String? = nil,
+             childFrameScript: String? = nil,
+             reloadsOnFetch: Bool = false,
+             maxSignInProbeAttempts: Int? = nil,
              headlineID: String? = nil,
              weeklyID: String? = nil,
              detailParse: ((String) throws -> ProviderUsageDetail?)? = nil,
@@ -179,6 +209,9 @@ final class WebSessionProvider: NSObject, UsageProvider {
             self.managePath = managePath
             self.initialPath = initialPath
             self.bootstrapScript = bootstrapScript
+            self.childFrameScript = childFrameScript
+            self.reloadsOnFetch = reloadsOnFetch
+            self.maxSignInProbeAttempts = maxSignInProbeAttempts
             self.headlineID = headlineID
             self.weeklyID = weeklyID
             self.detailParse = detailParse
@@ -198,7 +231,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
     /// usage payload we read, but the persisted session is enough to keep the
     /// settings row in its signed-in state after the sheet is reopened.
     nonisolated func account() -> ProviderAccount? {
-        guard UserDefaults.standard.bool(forKey: "\(id).signedIn") else { return nil }
+        guard UserDefaults.standard.bool(forKey: Self.sessionKey(for: site)) else { return nil }
         return ProviderAccount(
             label: nil,
             plan: nil,
@@ -219,6 +252,11 @@ final class WebSessionProvider: NSObject, UsageProvider {
     private var lastProbedURL: URL?
     private var signInProbeAttempts = 0
     private var switchGate: WebSessionAuthenticationGate?
+    private var lastFrameData: [String: String] = [:]
+    private var lastVerifiedURL: URL?
+    private var lastSignInCompletedAt: Date?
+
+    private static let frameDataHandlerName = "codenotchFrameData"
 
     var onAuthenticated: (() -> Void)?
 
@@ -246,6 +284,9 @@ final class WebSessionProvider: NSObject, UsageProvider {
         webView?.stopLoading()
         webView = nil
         lastAuthFingerprint = nil
+        lastFrameData = [:]
+        lastVerifiedURL = nil
+        lastSignInCompletedAt = nil
         contextRevision &+= 1
         self.site = site
         isLoaded = false
@@ -347,16 +388,45 @@ final class WebSessionProvider: NSObject, UsageProvider {
                 forMainFrameOnly: true
             ))
         }
+        if let childFrameScript = site.childFrameScript {
+            configuration.userContentController.add(
+                WeakScriptMessageHandler(self),
+                name: Self.frameDataHandlerName
+            )
+            configuration.userContentController.addUserScript(WKUserScript(
+                source: childFrameScript, injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            ))
+        }
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1100, height: 800),
                                 configuration: configuration)
         self.webView = webView
         return webView
     }
 
+    private var initialPageURL: URL {
+        site.initialPath.isEmpty ? site.origin : site.origin.appendingPathComponent(site.initialPath)
+    }
+
     private func ensureLoaded() async throws {
         let webView = makeWebViewIfNeeded()
-        if isLoaded, Self.matchesOrigin(webView.url, expected: site.origin) { return }
-        webView.load(URLRequest(url: site.initialPath.isEmpty ? site.origin : site.origin.appendingPathComponent(site.initialPath)))
+        if site.reloadsOnFetch {
+            let justSignedIn = lastSignInCompletedAt.map { Date().timeIntervalSince($0) < 12 } ?? false
+            if justSignedIn, isLoaded, Self.matchesOrigin(webView.url, expected: site.origin) {
+                lastSignInCompletedAt = nil
+                pushFrameDataToMainFrame()
+                return
+            }
+            lastSignInCompletedAt = nil
+            lastFrameData = [:]
+            isLoaded = false
+            let targetURL = lastVerifiedURL.flatMap { Self.matchesOrigin($0, expected: site.origin) ? $0 : nil }
+                ?? initialPageURL
+            webView.load(URLRequest(url: targetURL))
+        } else {
+            if isLoaded, Self.matchesOrigin(webView.url, expected: site.origin) { return }
+            webView.load(URLRequest(url: initialPageURL))
+        }
         // Settled is a state the page has to *stay* in, not a moment it passes
         // through. These consoles commit their HTML and hand off to SSO a beat
         // later from script, so the first instant of "same origin, not
@@ -410,6 +480,7 @@ final class WebSessionProvider: NSObject, UsageProvider {
             try await ensureLoaded()
             guard revision == contextRevision else { throw CancellationError() }
             guard let webView else { throw UsageProviderError.needsAuth }
+            pushFrameDataToMainFrame()
 
             // `callAsyncJavaScript`, not `evaluateJavaScript`. The latter returns
             // whatever the last expression evaluates to and never awaits it, so an
@@ -564,6 +635,9 @@ final class WebSessionProvider: NSObject, UsageProvider {
         signInProbeTask = nil
         switchGate = nil
         lastAuthFingerprint = nil
+        lastFrameData = [:]
+        lastVerifiedURL = nil
+        lastSignInCompletedAt = nil
         hasSignedIn = false
         isLoaded = false
 
@@ -690,8 +764,10 @@ final class WebSessionProvider: NSObject, UsageProvider {
             lastProbedURL = pageURL
             signInProbeAttempts = 0
         }
-        guard signInProbeAttempts < (site.confirmsSignInFromUsage ? 3 : 1) else { return false }
+        let maxAttempts = site.maxSignInProbeAttempts ?? (site.confirmsSignInFromUsage ? 3 : 1)
+        guard signInProbeAttempts < maxAttempts else { return false }
         signInProbeAttempts += 1
+        pushFrameDataToMainFrame()
 
         guard let result = try? await webView.callAsyncJavaScript(
                   probe, arguments: [:], in: nil, contentWorld: .page
@@ -750,6 +826,10 @@ final class WebSessionProvider: NSObject, UsageProvider {
     }
 
     private func authenticationDidComplete() {
+        if let url = webView?.url, Self.matchesOrigin(url, expected: site.origin) {
+            lastVerifiedURL = url
+        }
+        lastSignInCompletedAt = Date()
         hasSignedIn = true
         switchGate = nil
         signInProbeTask?.cancel()
@@ -759,6 +839,40 @@ final class WebSessionProvider: NSObject, UsageProvider {
         // The verified page can refresh directly, preserving Google's account slot.
         isLoaded = site.confirmsSignInFromUsage
         onAuthenticated?()
+    }
+
+    private func pushFrameDataToMainFrame() {
+        guard !lastFrameData.isEmpty,
+              let webView,
+              Self.matchesOrigin(webView.url, expected: site.origin),
+              let data = try? JSONSerialization.data(withJSONObject: lastFrameData),
+              let json = String(data: data, encoding: .utf8)
+        else { return }
+        webView.evaluateJavaScript("window.__codenotchFrameData = \(json);", completionHandler: nil)
+    }
+}
+
+extension WebSessionProvider: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == Self.frameDataHandlerName,
+              let payload = message.body as? [String: Any],
+              payload.count <= 10
+        else { return }
+        var updated = false
+        for (key, value) in payload {
+            guard key.count <= 32,
+                  let text = value as? String,
+                  !text.isEmpty, text.count <= 64
+            else { continue }
+            if lastFrameData[key] != text {
+                lastFrameData[key] = text
+                updated = true
+            }
+        }
+        if updated {
+            pushFrameDataToMainFrame()
+        }
     }
 }
 

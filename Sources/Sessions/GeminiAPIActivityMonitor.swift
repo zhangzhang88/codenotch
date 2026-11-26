@@ -27,7 +27,10 @@ final class GeminiAPIActivityMonitor: AgentActivityMonitor {
     /// How recently a source must have been touched to count as live. Generous,
     /// because a model can think for a while between two lines.
     private let staleAfter: TimeInterval
+    private let queue = DispatchQueue(label: "com.vinz.codenotch.gemini-api-activity", qos: .utility)
     private var timer: Timer?
+    private var isPolling = false
+    private var generation: UInt = 0
 
     init(geminiRoot: URL = GeminiCLIUsage.sessionsRoot,
          opencodeDatabase: URL = OpenCodeGeminiActivity.database,
@@ -43,6 +46,7 @@ final class GeminiAPIActivityMonitor: AgentActivityMonitor {
 
     func start() {
         stop()
+        generation &+= 1
         poll()
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.poll()
@@ -54,17 +58,32 @@ final class GeminiAPIActivityMonitor: AgentActivityMonitor {
     func stop() {
         timer?.invalidate()
         timer = nil
+        generation &+= 1
+        isPolling = false
     }
 
     private func poll() {
-        let found = Self.read(
-            geminiRoot: geminiRoot,
-            opencodeDatabase: opencodeDatabase,
-            hermesDatabase: hermesDatabase,
-            staleAfter: staleAfter
-        )
-        guard found != sessions else { return }
-        sessions = found
+        guard !isPolling else { return }
+        isPolling = true
+        let gen = generation
+        let geminiRoot = self.geminiRoot
+        let opencodeDatabase = self.opencodeDatabase
+        let hermesDatabase = self.hermesDatabase
+        let staleAfter = self.staleAfter
+        queue.async { [weak self] in
+            let found = Self.read(
+                geminiRoot: geminiRoot,
+                opencodeDatabase: opencodeDatabase,
+                hermesDatabase: hermesDatabase,
+                staleAfter: staleAfter
+            )
+            DispatchQueue.main.async {
+                guard let self, self.generation == gen else { return }
+                self.isPolling = false
+                guard found != self.sessions else { return }
+                self.sessions = found
+            }
+        }
     }
 
     static func read(

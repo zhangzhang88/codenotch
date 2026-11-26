@@ -161,8 +161,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // DeepSeek's ring is DeepSeekProvider, which reads either this
             // sign-in or an API key, so the WebView is not a ring of its own.
             let geminiApp = WebSessionProvider(site: GeminiAppUsage.site)
+            // Google AI Studio Billing backs GeminiAPIProvider's credit balance,
+            // GCP credits, and monthly spend limit without adding a second ring.
+            let aiStudioBilling = WebSessionProvider(site: AIStudioBilling.site)
             let webProviders: [WebSessionProvider] = [qianwen, mimo, qoder, geminiApp]
-            fleet.signInItems = [deepSeek, miniMaxWeb, qianwen, mimo, qoder, geminiApp].map { provider in
+            fleet.signInItems = [deepSeek, miniMaxWeb, qianwen, mimo, qoder, geminiApp, aiStudioBilling].map { provider in
                 let name = provider.displayName
                 return (title: L10n.t("Sign in to \(name)…"),
                         action: { [weak provider] in provider?.presentSignIn() })
@@ -220,9 +223,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                    // A closure, not the value: the provider is an actor and
                    // re-reads the budget on every fetch, so a ceiling typed
                    // into Settings applies without a restart.
-                   GeminiAPIProvider(budget: {
-                       Preferences.storedEffectiveCeiling(for: "gemini-api")
-                   })]
+                   GeminiAPIProvider(
+                       billingWeb: aiStudioBilling,
+                       budget: {
+                           Preferences.storedEffectiveCeiling(for: "gemini-api")
+                       }
+                   )]
                 + {
                     let manual = ManualProvider(
                         limitProvider: { Preferences.storedManualProviderLimit() },
@@ -286,6 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             geminiApp.onAuthenticated = { [weak store] in
                 store?.providerAuthenticationChanged(providerID: "gemini-app")
+            }
+            aiStudioBilling.onAuthenticated = { [weak store] in
+                store?.providerAuthenticationChanged(providerID: "gemini-api")
             }
             qianwen.onAuthenticated = { [weak store] in
                 store?.providerAuthenticationChanged(providerID: "qianwenai")

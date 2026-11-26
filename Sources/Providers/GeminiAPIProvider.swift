@@ -31,6 +31,10 @@ actor GeminiAPIProvider: UsageProvider {
     nonisolated private let openCodeDatabase: URL
     nonisolated private let hermesDatabase: URL
     nonisolated private let settingsFile: URL
+    /// Optional Google AI Studio Billing web session. When signed in, billing
+    /// balances (prepaid credit balance, eligible GCP credits, monthly spend
+    /// limit) take the headline and local tool logs follow underneath.
+    nonisolated(unsafe) private let billingWeb: WebSessionProvider?
     /// Read fresh on every fetch rather than captured once: the user can change
     /// it in Settings while the app runs, and the ring has to follow.
     private let budget: @Sendable () -> Int?
@@ -46,21 +50,56 @@ actor GeminiAPIProvider: UsageProvider {
         openCodeDatabase: URL = OpenCodeGeminiUsage.database,
         hermesDatabase: URL = HermesGeminiUsage.database,
         settingsFile: URL = GeminiAPICredentials.settingsFile,
+        billingWeb: WebSessionProvider? = nil,
         budget: @escaping @Sendable () -> Int?
     ) {
         self.cliRoot = cliRoot
         self.openCodeDatabase = openCodeDatabase
         self.hermesDatabase = hermesDatabase
         self.settingsFile = settingsFile
+        self.billingWeb = billingWeb
         self.budget = budget
     }
 
     nonisolated var signInRoute: SignInRoute {
-        .guidance(L10n.t("There is nothing to sign in to: the count is added up from what Gemini CLI, OpenCode and Hermes recorded about their own calls. Your API key is never read."))
+        if billingWeb != nil {
+            return .modal(name: "Google AI Studio")
+        }
+        return .guidance(L10n.t("There is nothing to sign in to: the count is added up from what Gemini CLI, OpenCode and Hermes recorded about their own calls. Your API key is never read."))
+    }
+
+    nonisolated func presentSignIn() {
+        guard let billingWeb else { return }
+        Task { @MainActor in billingWeb.presentSignIn() }
+    }
+
+    nonisolated func presentAccountSwitch() {
+        guard let billingWeb else { return }
+        let signedIn = billingWeb.account() != nil
+        Task { @MainActor in
+            if signedIn {
+                billingWeb.presentAccountSwitch()
+            } else {
+                billingWeb.presentSignIn()
+            }
+        }
+    }
+
+    func signOut() async {
+        await billingWeb?.signOut()
     }
 
     nonisolated func account() -> ProviderAccount? {
-        GeminiAPICredentials.account(
+        if billingWeb?.account() != nil {
+            let sourceNames = ["Google AI Studio"] + lastTools
+            return ProviderAccount(
+                label: nil,
+                plan: nil,
+                source: sourceNames.joined(separator: ", "),
+                manageURL: AIStudioBilling.manageURL
+            )
+        }
+        return GeminiAPICredentials.account(
             tools: lastTools,
             authType: GeminiAPICredentials.authType(at: settingsFile)
         )
@@ -68,14 +107,29 @@ actor GeminiAPIProvider: UsageProvider {
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
         let now = Date()
+        if let billingWeb, billingWeb.account() != nil {
+            let billingSnapshot = try await billingWeb.fetchSnapshot()
+            return Self.snapshot(
+                billingWindows: billingSnapshot.windows,
+                billingHeadlineID: billingSnapshot.headlineID,
+                sources: [],
+                now: now
+            )
+        }
+
         let sources = sources(now: now)
-        // Not an error and not a missing sign-in: none of the three tools has
-        // ever run here, so there is genuinely nothing being metered.
+        lastTools = sources.map(\.name)
+
+        // Not an error and not a missing sign-in when local-only: none of the
+        // three tools has ever run here, so there is genuinely nothing metered.
+        // When AI Studio Billing is available, prompt to sign in instead.
         guard !sources.isEmpty else {
+            if billingWeb != nil {
+                throw UsageProviderError.needsAuth
+            }
             throw UsageProviderError.nothingMetered(
                 L10n.t("No Gemini CLI, OpenCode or Hermes sessions found"))
         }
-        lastTools = sources.map(\.name)
         return Self.snapshot(sources: sources, budget: budget(), now: now)
     }
 
@@ -142,6 +196,52 @@ actor GeminiAPIProvider: UsageProvider {
             status: .ok,
             windows: windows,
             headlineID: "month",
+            block: nil
+        )
+    }
+
+    /// Combines Google AI Studio billing windows (headline + credit breakdown +
+    /// monthly spend limit) with optional local tool token counts underneath.
+    static func snapshot(
+        billingWindows: [LimitWindow],
+        billingHeadlineID: String? = "ai-studio-total",
+        sources: [GeminiTokenSource],
+        now: Date = Date()
+    ) -> ProviderSnapshot {
+        var windows = billingWindows
+        if !sources.isEmpty {
+            let total = sources.reduce(GeminiTokenUsage.zero) { $0.adding($1.usage) }
+            let calendar = GeminiTokenUsage.calendar
+            if total.tokensThisMonth > 0 {
+                let month = calendar.dateInterval(of: .month, for: now)
+                windows.append(LimitWindow(
+                    id: "month",
+                    label: L10n.t("Tokens this month"),
+                    used: total.tokensThisMonth,
+                    resetsAt: month?.end,
+                    duration: month?.duration
+                ))
+            }
+            if total.tokensToday > 0 {
+                windows.append(LimitWindow(
+                    id: "today",
+                    label: L10n.t("Tokens today"),
+                    used: total.tokensToday,
+                    resetsAt: calendar.dateInterval(of: .day, for: now)?.end
+                ))
+            }
+        }
+        let resolvedHeadline = billingHeadlineID.flatMap { id in
+            windows.contains { $0.id == id } ? id : nil
+        } ?? windows.first?.id
+        return ProviderSnapshot(
+            id: providerID,
+            displayName: providerName,
+            glyph: .geminiSpark,
+            fidelity: .official,
+            status: .ok,
+            windows: windows,
+            headlineID: resolvedHeadline,
             block: nil
         )
     }

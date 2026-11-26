@@ -2255,44 +2255,62 @@ private struct AccountRow: View {
                 }
             }
 
-            // Google publishes no limit for a bare API key, so the ring fills
-            // against a user-configured ceiling or one inferred from peak usage.
+            // Google AI Studio Billing sign-in (credit balance, GCP credits,
+            // monthly spend limit) plus fallback local token budget.
             if isConnected, provider.id == "gemini-api" {
-                let peak = preferences.observedPeakUsage[provider.id] ?? 0
-                let inferred = peak > 0 ? PlanCeiling.infer(from: peak) : nil
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(L10n.t("Monthly budget"))
-                    HStack(spacing: 8) {
-                        TextField(inferred.map { "Auto (~\(PlanCeiling.compact($0)))" } ?? L10n.t("None"),
-                                  value: $preferences.geminiAPIMonthlyTokenBudget,
-                                  format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .labelsHidden()
-                            .frame(width: 140)
-                        Text(L10n.t("tokens"))
-                        if preferences.geminiAPIMonthlyTokenBudget != nil {
-                            Button(L10n.t("Auto")) {
-                                preferences.geminiAPIMonthlyTokenBudget = nil
+                let hasAIStudioSession = UserDefaults.standard.bool(forKey: AIStudioBilling.sessionKey)
+                if !hasAIStudioSession {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Button(L10n.t("Sign in to Google AI Studio…")) {
+                                _ = switchAccount(provider.id)
                             }
-                            .buttonStyle(.borderless)
-                            .font(.caption)
-                            .help(L10n.t("Revert to auto-inferred ceiling based on peak usage."))
+                            .controlSize(.small)
                         }
+                        Text(L10n.t("Sign in to Google AI Studio Billing to show credit balance, GCP credits, and monthly spend limit."))
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    if peak > 0 {
-                        HStack(spacing: 4) {
-                            Text(L10n.t("Observed peak: \(PlanCeiling.compact(peak)) tokens"))
-                            if let inferred {
-                                Text("· \(L10n.t("Inferred: ~\(PlanCeiling.compact(inferred))"))")
-                            }
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    }
+                    .padding(.top, 2)
                 }
-                .padding(.top, 2)
-                .foregroundStyle(.secondary)
-                .help(L10n.t("Fills the ring against a ceiling you choose or inferred from peak usage; Google publishes none for an API key."))
+
+                if !hasAIStudioSession {
+                    let peak = preferences.observedPeakUsage[provider.id] ?? 0
+                    let inferred = peak > 0 ? PlanCeiling.infer(from: peak) : nil
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(L10n.t("Monthly budget"))
+                        HStack(spacing: 8) {
+                            TextField(inferred.map { "Auto (~\(PlanCeiling.compact($0)))" } ?? L10n.t("None"),
+                                      value: $preferences.geminiAPIMonthlyTokenBudget,
+                                      format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .labelsHidden()
+                                .frame(width: 140)
+                            Text(L10n.t("tokens"))
+                            if preferences.geminiAPIMonthlyTokenBudget != nil {
+                                Button(L10n.t("Auto")) {
+                                    preferences.geminiAPIMonthlyTokenBudget = nil
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                                .help(L10n.t("Revert to auto-inferred ceiling based on peak usage."))
+                            }
+                        }
+                        if peak > 0 {
+                            HStack(spacing: 4) {
+                                Text(L10n.t("Observed peak: \(PlanCeiling.compact(peak)) tokens"))
+                                if let inferred {
+                                    Text("· \(L10n.t("Inferred: ~\(PlanCeiling.compact(inferred))"))")
+                                }
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.top, 2)
+                    .foregroundStyle(.secondary)
+                    .help(L10n.t("Fills the ring against a ceiling you choose or inferred from peak usage; Google publishes none for an API key."))
+                }
             }
 
             // Manual provider: user-declared limits and reset schedule.
